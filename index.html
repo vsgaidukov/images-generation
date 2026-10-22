@@ -111,7 +111,7 @@
 
         <label for="key">Личный ключ Pollinations (необязательно)</label>
         <input id="key" type="password" autocomplete="off" placeholder="sk_...">
-        <p class="hint">Без ключа генерация бесплатная, но медленнее и с ограничениями. С бесплатным ключом с
+        <p class="hint">Без ключа генерация бесплатная, но не чаще одного снимка в 15 секунд и со значком pollinations.ai в углу. С бесплатным ключом с
           <a href="https://enter.pollinations.ai" target="_blank" rel="noopener">enter.pollinations.ai</a>
           лимиты выше. Ключ хранится только в этом браузере.</p>
 
@@ -195,18 +195,30 @@ function buildUrl(prompt, w, h, seed, key) {
   return "https://image.pollinations.ai/prompt/" + p + "?" + q;
 }
 
-const ERRORS = {
-  401: "Ключ не подошёл. Проверьте его в настройках.",
-  402: "На аккаунте Pollinations закончился бесплатный лимит.",
-  403: "Доступ без ключа сейчас закрыт. Получите бесплатный ключ (ссылка в разделе «Дополнительно»).",
+const ERRORS_KEY = {
+  401: "Ключ не подошёл. Проверьте его в разделе «Дополнительно».",
+  402: "На вашем аккаунте Pollinations закончился бесплатный лимит.",
+  403: "Ключ не подошёл. Проверьте его в разделе «Дополнительно».",
   429: "Слишком много запросов. Подождите полминуты и попробуйте снова."
 };
+const ANON_LIMIT = "Бесплатный лимит без ключа временно исчерпан. Подождите минуту и попробуйте снова, " +
+  "или добавьте бесплатный ключ в разделе «Дополнительно».";
+const ANON_PAUSE = 16; // без ключа сервис пропускает примерно один запрос в 15 секунд
+
+class HttpError extends Error {
+  constructor(status, message) { super(message); this.status = status; }
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function countdown(seconds, text) {
+  for (let s = seconds; s > 0; s--) { setStatus(text + " " + s + " с"); await sleep(1000); }
+}
 
 // Через fetch, чтобы картинку можно было скачать; если сервер не разрешает CORS — просто через <img>
 async function loadImage(url, key) {
   try {
     const r = await fetch(url, key ? { headers: { Authorization: "Bearer " + key } } : {});
-    if (!r.ok) throw new Error(ERRORS[r.status] || "Сервис вернул ошибку " + r.status + ".");
+    if (!r.ok) throw new HttpError(r.status, key ? (ERRORS_KEY[r.status] || "Сервис вернул ошибку " + r.status + ".") : ANON_LIMIT);
     return URL.createObjectURL(await r.blob());
   } catch (e) {
     if (!(e instanceof TypeError)) throw e;
@@ -214,7 +226,7 @@ async function loadImage(url, key) {
     await new Promise((ok, fail) => {
       const img = new Image();
       img.onload = ok;
-      img.onerror = () => fail(new Error(key ? "Не удалось получить картинку. Проверьте ключ." : ERRORS[403]));
+      img.onerror = () => fail(new HttpError(0, key ? "Не удалось получить картинку. Проверьте ключ." : ANON_LIMIT));
       img.src = src;
     });
     return src;
@@ -264,10 +276,21 @@ $("form").addEventListener("submit", async e => {
 
     for (let i = 0; i < count; i++) {
       const seed = baseSeed + i;
+      if (i > 0 && !key) await countdown(ANON_PAUSE, "Без ключа нужна пауза между снимками. Следующий через");
       setStatus("Рисую " + (i + 1) + " из " + count + "… обычно 5–30 секунд");
       const card = addCard(seed);
+      const url = buildUrl(prompt, w, h, seed, key);
       try {
-        fillCard(card, await loadImage(buildUrl(prompt, w, h, seed, key), key), w, h, seed);
+        let src;
+        try {
+          src = await loadImage(url, key);
+        } catch (err) {
+          // Без ключа отказ обычно означает «слишком часто» — ждём и пробуем ещё раз
+          if (key || !(err instanceof HttpError)) throw err;
+          await countdown(20, "Сервис просит подождать. Повторю через");
+          src = await loadImage(url, key);
+        }
+        fillCard(card, src, w, h, seed);
       } catch (err) {
         card.remove();
         throw err;
